@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large bio files (avoid committing real data)
+*.fastq
+*.fq
+*.fasta
+*.fa
+*.gb
+*.gbk
+*.embl
+*.gz
+*.bz2
