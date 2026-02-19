@@ -21,6 +21,33 @@ def _parse_id_list(filter_ids: Optional[str]) -> Optional[Set[str]]:
     return ids or None
 
 
+def _phred_stats(qual: str) -> Dict:
+    """Compute Phred-score derived stats from a raw qual string (Sanger offset 33)."""
+    if not qual:
+        return {
+            "Avg_quality": 0.0,
+            "Min_quality": 0,
+            "Max_quality": 0,
+            "Q20_bases": 0,
+            "Q30_bases": 0,
+            "Q20_percent": 0.0,
+            "Q30_percent": 0.0,
+        }
+    scores = [ord(c) - 33 for c in qual]
+    n = len(scores)
+    q20 = sum(1 for s in scores if s >= 20)
+    q30 = sum(1 for s in scores if s >= 30)
+    return {
+        "Avg_quality": sum(scores) / n,
+        "Min_quality": min(scores),
+        "Max_quality": max(scores),
+        "Q20_bases": q20,
+        "Q30_bases": q30,
+        "Q20_percent": 100 * q20 / n,
+        "Q30_percent": 100 * q30 / n,
+    }
+
+
 def process_fasta_like_stream(handle: TextIO, file_format: str, mode: str, max_records: int) -> List[Dict]:
     rows: List[Dict] = []
     for i, record in enumerate(SeqIO.parse(handle, file_format), start=1):
@@ -63,7 +90,7 @@ def process_fastq_stream(handle: TextIO, mode: str, max_records: int, wanted_ids
 
         comp = atgc_content(seq, mode=mode)
         gc = gc_fraction(seq, mode=mode)
-        avg_q = (sum((ord(c) - 33) for c in qual) / len(qual)) if qual else 0.0
+        quality_stats = _phred_stats(qual)
 
         rows.append({
             "ID": record_id,
@@ -72,7 +99,6 @@ def process_fastq_stream(handle: TextIO, mode: str, max_records: int, wanted_ids
             "Quality": qual,      # optional; remove if too heavy
             "Length": len(seq),
             "GC_percent": None if gc is None else 100 * gc,
-            "Avg_quality": avg_q,
             "A": comp.counts["A"],
             "T": comp.counts["T"],
             "G": comp.counts["G"],
@@ -80,6 +106,7 @@ def process_fastq_stream(handle: TextIO, mode: str, max_records: int, wanted_ids
             "N": comp.counts["N"],
             "AMB": comp.counts["AMB"],
             "denom_used": comp.denom,
+            **quality_stats,
         })
 
         kept += 1
@@ -100,6 +127,8 @@ def get_sequence_stats(content: bytes, filename: str, mode: str = "canonical") -
         # sniff FASTA/FASTQ only
         prefix = handle.read(2048)
         file_format = sniff_fasta_fastq(prefix)
+        if not hasattr(handle, "seek"):
+            raise ValueError("Handle is not seekable; cannot sniff and rewind.")
         handle.seek(0)
 
     if file_format is None:
@@ -107,6 +136,8 @@ def get_sequence_stats(content: bytes, filename: str, mode: str = "canonical") -
 
     total_bases = 0
     total_gc_percent = 0.0
+    total_q = 0
+    total_q_bases = 0
     count = 0
 
     if file_format == "fastq":
@@ -115,6 +146,8 @@ def get_sequence_stats(content: bytes, filename: str, mode: str = "canonical") -
             total_bases += L
             gc = gc_fraction(seq, mode=mode)
             total_gc_percent += (0.0 if gc is None else 100 * gc)
+            total_q += sum(ord(c) - 33 for c in qual)
+            total_q_bases += len(qual)
             count += 1
     else:
         for record in SeqIO.parse(handle, file_format):
@@ -127,8 +160,9 @@ def get_sequence_stats(content: bytes, filename: str, mode: str = "canonical") -
 
     avg_len = (total_bases / count) if count else 0.0
     avg_gc = (total_gc_percent / count) if count else 0.0
+    avg_q = (total_q / total_q_bases) if total_q_bases else None
 
-    return {
+    result = {
         "filename": filename,
         "format": file_format,
         "compression": compression,
@@ -137,6 +171,12 @@ def get_sequence_stats(content: bytes, filename: str, mode: str = "canonical") -
         "average_length": round(avg_len, 2),
         "average_gc_content": round(avg_gc, 2),
     }
+
+    # only present for FASTQ
+    if avg_q is not None:
+        result["average_quality"] = round(avg_q, 2)
+
+    return result
 
 
 def filter_fastq(content: bytes, filename: str, filter_ids: Optional[str] = None,
@@ -174,6 +214,8 @@ def process_sequences_universal(content: bytes, filename: str, mode: str = "cano
     if file_format is None:
         prefix = handle.read(2048)
         file_format = sniff_fasta_fastq(prefix)
+        if not hasattr(handle, "seek"):
+            raise ValueError("Handle is not seekable; cannot sniff and rewind.")
         handle.seek(0)
 
     if file_format is None:
