@@ -12,23 +12,17 @@ from format_detect import detect_file_format, sniff_fasta_fastq
 from composition import atgc_content, gc_fraction
 
 
-def _parse_id_list(filter_ids: Optional[str]) -> Optional[Set[str]]:  #this function only accepts strings or none
+def _parse_id_list(filter_ids: Optional[str]) -> Optional[Set[str]]:
     if not filter_ids:
         return None
-
     # comma or whitespace separated
-    raw = (
-        filter_ids
-        .replace("\n", ",")
-        .replace(" ", ",")
-        .split(",")
-    )
-
+    raw = filter_ids.replace("\n", ",").replace(" ", ",").split(",")
     ids = {x.strip() for x in raw if x.strip()}
     return ids or None
 
 
-def _phred_stats(qual: str) -> Dict:  #This function computes quality metrics from a FASTQ quality string (Sanger offset 33).
+def _phred_stats(qual: str) -> Dict:
+    """Compute Phred-score derived stats from a raw qual string (Sanger offset 33)."""
     if not qual:
         return {
             "Avg_quality": 0.0,
@@ -39,27 +33,26 @@ def _phred_stats(qual: str) -> Dict:  #This function computes quality metrics fr
             "Q20_percent": 0.0,
             "Q30_percent": 0.0,
         }
-    scores = [ord(c) - 33 for c in qual] #Convert to ASCII integer and Subtract 33
-
-    n = len(scores)  #Each character corresponds to one base.
+    scores = [ord(c) - 33 for c in qual]
+    n = len(scores)
     q20 = sum(1 for s in scores if s >= 20)
-    q30 = sum(1 for s in scores if s >= 30)  #Modern Illumina runs aim for high Q30 percentages.
+    q30 = sum(1 for s in scores if s >= 30)
     return {
         "Avg_quality": sum(scores) / n,
         "Min_quality": min(scores),
         "Max_quality": max(scores),
         "Q20_bases": q20,
-        "Q30_bases": q30,  #Measure how many bases have low error probability
+        "Q30_bases": q30,
         "Q20_percent": 100 * q20 / n,
         "Q30_percent": 100 * q30 / n,
     }
-#Q20/Q30 percentages tell you, What fraction of bases is confidently reliable
+
 
 def process_fasta_like_stream(handle: TextIO, file_format: str, mode: str, max_records: int) -> List[Dict]:
     rows: List[Dict] = []
     for i, record in enumerate(SeqIO.parse(handle, file_format), start=1):
         if i > max_records:
-            break  #stop after reading a certain number of sequences.
+            break
 
         seq = str(record.seq)
         comp = atgc_content(seq, mode=mode)
@@ -68,7 +61,7 @@ def process_fasta_like_stream(handle: TextIO, file_format: str, mode: str, max_r
         rows.append({
             "ID": record.id,
             "Description": getattr(record, "description", ""),
-            "Sequence": seq,  # keep for Details tab remove if memory becomes an issue
+            "Sequence": seq,  # keep for Details tab; remove if memory becomes an issue
             "Length": len(seq),
             "GC_percent": None if gc is None else 100 * gc,
             "A": comp.counts["A"],
@@ -88,34 +81,22 @@ def process_fastq_stream(handle: TextIO, mode: str, max_records: int, wanted_ids
     rows: List[Dict] = []
     kept = 0
 
-    # STREAMING
+    # STREAMING: no handle.read()
     for title, seq, qual in FastqGeneralIterator(handle):
         record_id = title.split(None, 1)[0]
 
         if wanted_ids is not None and record_id not in wanted_ids:
-            continue  #If  passed a set of IDs we want, skip others,So filtering happens before heavy computation.
+            continue
 
         comp = atgc_content(seq, mode=mode)
         gc = gc_fraction(seq, mode=mode)
-        #mode controls how the denominator is computed when calculating base fractions and GC%.
-        #Inside atgc_content:
-           #if mode == "raw":
-           #denom = len(s)
-           #elif mode == "canonical":
-           #denom = counts["A"] + counts["T"] + counts["G"] + counts["C"]
-           #So:
-           #"raw" → denominator = full sequence length
-           #"canonical" → denominator = only A, T, G, C
-
-
-
         quality_stats = _phred_stats(qual)
 
-        rows.append({    #Each record becomes a dictionary of stats.
+        rows.append({
             "ID": record_id,
             "Title": title,
             "Sequence": seq,      # keep for Details tab
-            "Quality": qual,
+            "Quality": qual,      # optional; remove if too heavy
             "Length": len(seq),
             "GC_percent": None if gc is None else 100 * gc,
             "A": comp.counts["A"],
@@ -128,16 +109,17 @@ def process_fastq_stream(handle: TextIO, mode: str, max_records: int, wanted_ids
             **quality_stats,
         })
 
-        kept += 1   #kept counts how many records were actually processed and stored.
+        kept += 1
         if kept >= max_records:
-            break  #stop after reading a certain number of sequences.
+            break
 
     return rows
 
 
 def get_sequence_stats(content: bytes, filename: str, mode: str = "canonical") -> Dict:
-
-
+    """
+    Stats-only: memory efficient. Computes totals and averages without storing per-record data.
+    """
     compression, handle = open_text_handle(content)
 
     file_format = detect_file_format(filename)
@@ -210,7 +192,7 @@ def filter_fastq(content: bytes, filename: str, filter_ids: Optional[str] = None
     compression, handle = open_text_handle(content)
 
     sequences = process_fastq_stream(handle, mode=mode, max_records=max_records, wanted_ids=wanted_ids)
-#
+
     return {
         "filename": filename,
         "format": file_format,
@@ -222,23 +204,19 @@ def filter_fastq(content: bytes, filename: str, filter_ids: Optional[str] = None
     }
 
 
-#It takes raw file content (bytes) and Detects compression and Detects format (FASTA, FASTQ, GenBank, EMBL) Parses records
-#Computes sequence stats
-#Returns structured summary
 def process_sequences_universal(content: bytes, filename: str, mode: str = "canonical", max_records: int = 200) -> Dict:
     """
     Universal processing: FASTA/FASTQ/GenBank/EMBL (+ gz/bz2) -> preview records list.
     """
-    compression, handle = open_text_handle(content)  #Detects gzip/bz2 compression,Wraps bytes in appropriate decompressor,Returns a readable text stream
+    compression, handle = open_text_handle(content)
 
-#Read first 2048 characters -> Inspect header patterns -> Determine if FASTA or FASTQ
     file_format = detect_file_format(filename)
     if file_format is None:
         prefix = handle.read(2048)
         file_format = sniff_fasta_fastq(prefix)
         if not hasattr(handle, "seek"):
             raise ValueError("Handle is not seekable; cannot sniff and rewind.")
-        handle.seek(0) #This resets the file pointer back to position 0
+        handle.seek(0)
 
     if file_format is None:
         raise ValueError("Could not detect file format. Use correct extension.")
